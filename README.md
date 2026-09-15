@@ -1,5 +1,7 @@
 # Socks-VPS
 
+[程序入口](cmd/) · [实现代码](internal/) · [协作资料](cowork/)
+
 ```bash
 bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download/install.sh)
 ```
