@@ -1,6 +1,6 @@
 # Socks-VPS
 
-[Outline 项目目录](https://internal.novixlink.com/doc/socks-vps-N1KJczXwJ6) · [程序入口](cmd/) · [实现代码](internal/) · [协作资料](cowork/)
+[程序入口](cmd/) · [实现代码](internal/)
 
 ```bash
 bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download/install.sh)
@@ -157,7 +157,3 @@ sudo systemctl start socks-vps.service
 ## License
 
 Socks-VPS 以 [MIT License](LICENSE) 发布。第三方许可和 IPdeny 数据来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-## 项目协作
-
-项目资料：[背景](cowork/background.md)、[规则](cowork/rules.md)、[待办](cowork/todo.md)和[文档索引](cowork/docs/README.md)。

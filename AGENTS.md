@@ -8,7 +8,7 @@ Socks-VPS 是独立Go SOCKS5服务，不引入Xray运行时。
 - 配置、端口、凭据及大陆来源开关以实例JSON为权威。手动端口保持原值；自动端口以真实bind为准。合法无操作不安装依赖、不停服、不写配置。
 - 与WARP VPS Manager独立：服务、网卡、路由、配置及其nftables对象都是外部资源。生命周期只处理归属明确的Socks-VPS资源。
 - CN阻断使用项目自有nftables表，不绕过主机已有策略。IPdeny数据由维护者校验后随版本包交付，VPS生命周期不另行获取IPdeny。
-- 同一次修改仅暂存必要原值，不恢复持久快照、marker或第二套状态。系统适配、依赖、交互及完整生命周期合同以[实现偏好](cowork/docs/implementation-preferences.md)为准。
+- 同一次修改仅暂存必要原值，不恢复持久快照、marker或第二套状态。系统适配、依赖、交互及完整生命周期合同以维护者资料中的实现偏好（`cowork/docs/implementation-preferences.md`）为准。
 - 公开源码和发布包各自使用精确成员清单，不为通过而放宽门禁。发布、双架构包验证与Linux实际网络验收分别记录；历史授权不作为当前执行许可。
 - 凭据、测试机地址与SSH信息不进入共享文档或发布包；安装包不包含AGENTS、cowork或localwork。
 
@@ -22,13 +22,8 @@ Socks-VPS 是独立Go SOCKS5服务，不引入Xray运行时。
 
 ## 资料入口
 
-按当前任务选择[背景](cowork/background.md)、[项目规则](cowork/rules.md)、[待办](cowork/todo.md)、[技术文档](cowork/docs/README.md)和[错误记录](cowork/error/README.md)。本仓库Git中的规则与cowork是团队共享依据；根AGENTS保留核心约束，详细合同和操作在索引指向的唯一位置维护。
-
-`cowork/`保持background、rules、todo三个Markdown文件及docs、error两个目录。`localwork/`仅保存个人本机备注与证据索引，不覆盖团队规则，不进入Git或发布产物；没有本机资料时保持空目录。
-
-## Outline项目知识接入
-
-- 本项目二级目录：[Socks-VPS](https://internal.novixlink.com/doc/socks-vps-N1KJczXwJ6)。维护范围为该目录及下属文件，项目介绍、架构与插件各用独立文件；必要时再分组。
-- 公司知识库入口为 [Outline](https://internal.novixlink.com)，MCP endpoint 为 `https://internal.novixlink.com/mcp`。优先使用本机已配置的相关 MCP，以个人 OAuth 或已获授权的专用 Agent 身份接入；凭据、token 与认证 URL 不写入仓库。
-- 按当前任务需要阅读相关项目介绍、架构与跨团队协作资料。日常开发文档、技术合同、待办和经验仍由本仓库 `cowork/` 及既有技术文档维护；个人隐私与偏好留在被忽略的 `localwork/`，不进入公司知识库。
-- 仅在大版本更新或项目介绍、架构、跨团队协作发生重大变化时，按已获授权范围维护对应 Outline 页面并回读；保留源码与工程文档链接，不复制日常开发记录，不因普通修复、查询、草稿或经验积累自动同步。
+- 维护者内部资料（背景、规则、待办、技术文档与错误记录）在私有仓库 `NovixLink/Socks-VPS-internal`。有权限时在本仓库根目录执行 `gh repo clone NovixLink/Socks-VPS-internal cowork`；`cowork/` 已被忽略，不进入公开仓库。
+- 存在 `cowork/AGENTS.md` 时先读取它，再按任务选择其中资料。
+- 无权限或尚未克隆时只按本文件和 README 工作；不在公开仓库新建 cowork 或提交内部资料，需要交接记录时先联系维护者。
+- 本仓库只提交公开源码、规则和使用说明；内部链接与内部规则只写在 cowork。
+- `localwork/`仅保存个人本机备注与证据索引，不覆盖团队规则，不进入Git或发布产物；没有本机资料时保持空目录。
