@@ -85,7 +85,7 @@ status_line() {
 
 die() {
     status_line error "$*" 2
-    exit 1
+    exit "${non_interactive_exit_code:-1}"
 }
 
 note() {
@@ -693,6 +693,7 @@ ensure_system_dependencies() {
     local version=$3
     local manager package
     local dependencies_present=true
+    local missing_commands=
     local -a packages=()
 
     action_dependency_requirements "${action}" "${allow_cn}" "${version}"
@@ -701,11 +702,20 @@ ensure_system_dependencies() {
     fi
     if [[ ${dependency_need_nft} == true ]] && ! command -v nft >/dev/null 2>&1; then
         dependencies_present=false
+        missing_commands+=' nft'
     fi
     if [[ ${dependency_need_ss} == true ]] && ! command -v ss >/dev/null 2>&1; then
         dependencies_present=false
+        missing_commands+=' ss'
     fi
     if [[ ${dependencies_present} == false ]]; then
+        if [[ ${non_interactive:-false} == true && ${install_dependencies} == false ]]; then
+            die "缺少所需系统依赖：${missing_commands# }；请预先安装，或指定 --install-deps"
+        fi
+        if [[ ${non_interactive:-false} == true ]]; then
+            local DEBIAN_FRONTEND=noninteractive
+            export DEBIAN_FRONTEND
+        fi
         manager=$(detect_package_manager)
         while IFS= read -r package; do
             [[ -n ${package} ]] && packages+=("${package}")
@@ -881,6 +891,9 @@ check_or_reselect_port() {
             return 0
         fi
         report_port_conflict "${port}"
+        if [[ ${non_interactive:-false} == true ]]; then
+            return 78
+        fi
     else
         [[ -z ${output} ]] || printf '%s\n' "${output}" >&2
         printf '无法检查 TCP 端口 %s（退出码 %s）。\n' "${port}" "${status}" >&2
@@ -1018,6 +1031,9 @@ transaction_exit() {
     fi
     if ((rollback_status != 0)); then
         status=${rollback_status}
+        if [[ ${non_interactive:-false} == true ]]; then
+            status=70
+        fi
     fi
     exit "${status}"
 }
@@ -1686,6 +1702,9 @@ start_and_verify() {
             if ! systemctl status socks-vps.service --no-pager; then
                 printf '上方为启动失败时的服务状态。\n' >&2
             fi
+            if [[ ${non_interactive:-false} == true && ${exec_status} == 78 ]]; then
+                non_interactive_exit_code=78
+            fi
             die "服务启动失败（start=${start_status}，verify=${verify_status}，ExecMainStatus=${exec_status}）"
         fi
 
@@ -1753,10 +1772,14 @@ install_or_replace() {
     local password=$8
     local release_dir
     local selected
+    local port_status
     local allow_current_owner=false
     local installed_version_file
 
     if [[ ${action} == install ]]; then
+        if [[ ${non_interactive:-false} == true ]]; then
+            non_interactive_exit_code=73
+        fi
         check_fresh_path_conflicts
         check_fresh_account_conflicts
     else
@@ -1771,7 +1794,17 @@ install_or_replace() {
             return
         fi
     fi
-    ensure_system_dependencies "${action}" "${allow_cn}" "${version}"
+    if [[ ${non_interactive:-false} == true ]]; then
+        non_interactive_exit_code=69
+    fi
+    if [[ ${non_interactive:-false} == true ]]; then
+        ensure_system_dependencies "${action}" "${allow_cn}" "${version}" </dev/null
+    else
+        ensure_system_dependencies "${action}" "${allow_cn}" "${version}"
+    fi
+    if [[ ${non_interactive:-false} == true ]]; then
+        non_interactive_exit_code=70
+    fi
 
     if [[ ${action} == install || ${action} == reinstall ]]; then
         if [[ ${action} == reinstall ]]; then
@@ -1780,8 +1813,13 @@ install_or_replace() {
         selected=$(check_or_reselect_port \
             "${port_mode}" \
             "${requested_port}" \
-                "${allow_current_owner}") ||
+                "${allow_current_owner}") || {
+            port_status=$?
+            if [[ ${non_interactive:-false} == true && ${port_status} == 78 ]]; then
+                non_interactive_exit_code=78
+            fi
             die '所选端口不可用'
+        }
         requested_port=${selected}
         check_new_config_without_write \
             "${requested_port}" \
@@ -1840,6 +1878,9 @@ install_or_replace() {
         return
     fi
 
+    if [[ ${non_interactive:-false} == true ]]; then
+        non_interactive_exit_code=71
+    fi
     start_and_verify \
         "${port_mode}" \
         "${version}" \
@@ -1848,10 +1889,15 @@ install_or_replace() {
         "${password}" \
         "${allow_cn}" \
         "${requested_port}"
+    if [[ ${non_interactive:-false} == true ]]; then
+        non_interactive_exit_code=70
+    fi
     prepare_share_link "${name}" "${instances_dir}/${name}.json" || :
     commit_transaction
     cleanup_legacy_artifacts
-    print_connection_details "${name}" true
+    if [[ ${non_interactive:-false} != true ]]; then
+        print_connection_details "${name}" true
+    fi
 }
 
 uninstall_permanently() {
@@ -2323,6 +2369,12 @@ privileged_apply() {
         check_package "${version}"
         success '安装包校验通过'
     fi
+    if [[ ${non_interactive:-false} == true ]]; then
+        prepare_non_interactive_config "${version}"
+        port=${selected_port}
+        username=${selected_username}
+        password=${selected_password}
+    fi
 
     case ${action} in
         install | update | reinstall)
@@ -2335,7 +2387,9 @@ privileged_apply() {
                 "${instance_name}" \
                 "${username}" \
                 "${password}"
-            print_menu_hint
+            if [[ ${non_interactive:-false} != true ]]; then
+                print_menu_hint
+            fi
             ;;
         add)
             add_instance \
@@ -2390,6 +2444,189 @@ privileged_entry() {
         "${instance_name}" \
         "${username}" \
         "${password}"
+}
+
+print_install_help() {
+    cat <<'HELP'
+用法：bash install.sh [--non-interactive [选项]]
+不带参数时使用交互安装或管理菜单。
+
+免交互全新安装（必须以 root 运行；成功时 stdout 仅输出一个 JSON 对象）：
+  --port auto|PORT       自动选择（默认），或指定 1024-65535 的端口
+  --username USERNAME    指定用户名；省略时生成 20 位安全随机值
+  --password-stdin      从 stdin 读取密码至 EOF，允许一个末尾换行
+                        密码为 1-255 字节 UTF-8，不含 NUL、CR 或内嵌 LF
+                        省略时生成密码，仅在 JSON 的 generated_password 中返回
+  --allow-cn=true|false  是否允许大陆来源；默认 false（开启阻断）
+  --install-deps        允许通过 APT、DNF 或 YUM 安装缺少的 ss/nft 依赖
+  --help                显示帮助
+
+指定端口冲突即失败；自动端口遇启动 bind 竞争最多重选一次。
+已安装或存在不完整安装时拒绝，不修改实例。不自动使用 sudo。
+JSON：config、port、username、block_cn、public_ipv4、share_link、version、
+      generated_password。公网 IPv4 或链接不可用时为 null；提供密码时
+      generated_password 和 share_link 为 null（链接包含可逆编码的密码）。
+退出码：0 成功；64 参数/密码无效；65 安装包或校验失败；69 依赖失败；
+        70 其他安装/回滚/结果失败；71 启动或健康检查失败；
+        73 已安装/路径/专用账号冲突；77 非 root；78 端口冲突。
+HELP
+}
+
+prepare_non_interactive_config() {
+    local version=$1
+    local requested_username=${selected_username}
+
+    non_interactive_exit_code=70
+    if [[ -z ${requested_username} || ${password_stdin} == false ]]; then
+        generate_secret_pair
+    fi
+    if [[ -n ${requested_username} ]]; then
+        selected_username=${requested_username}
+    fi
+    non_interactive_exit_code=64
+    if [[ ${password_stdin} == true ]]; then
+        # Read a bounded record through EOF; -s also disables echo on a terminal.
+        if IFS= read -r -s -d '' -n 257 selected_password; then
+            die '密码 stdin 包含 NUL 或超过允许长度'
+        fi
+        selected_password=${selected_password%$'\n'}
+        [[ ${selected_password} != *$'\n'* && ${selected_password} != *$'\r'* ]] ||
+            die '密码 stdin 只能包含一行，允许一个末尾换行'
+    fi
+    if [[ ${selected_port_mode} == automatic ]]; then
+        non_interactive_exit_code=70
+        selected_port=$("${package_binary}" port-select)
+    fi
+    non_interactive_exit_code=64
+    check_new_config_without_write \
+        "${selected_port}" "${version}" "${selected_username}" \
+        "${selected_password}" "${selected_allow_cn}"
+}
+
+json_string() {
+    local value=$1 character escaped index
+    local LC_ALL=C
+
+    printf '"'
+    for ((index = 0; index < ${#value}; index++)); do
+        character=${value:index:1}
+        case ${character} in
+            '"' | \\) printf '\\%s' "${character}" ;;
+            *)
+                if [[ ${character} < $'\x20' ]]; then
+                    printf -v escaped '\\u%04x' "'${character}"
+                    printf '%s' "${escaped}"
+                else
+                    printf '%s' "${character}"
+                fi
+                ;;
+        esac
+    done
+    printf '"'
+}
+
+print_install_json() {
+    local version=$1
+    local block_cn=true
+
+    read_config_detail "${instances_dir}/socks-1.json"
+    [[ ${detail_allow_cn} != true ]] || block_cn=false
+    printf '{"config":"socks-1","port":%s,"username":' "${detail_port}"
+    json_string "${detail_username}"
+    printf ',"block_cn":%s,"public_ipv4":' "${block_cn}"
+    if [[ -n ${detail_share_link} ]]; then
+        json_string "${detail_server_ip}"
+    else
+        printf 'null'
+    fi
+    printf ',"share_link":'
+    if [[ ${password_stdin} == false && -n ${detail_share_link} ]]; then
+        json_string "${detail_share_link}"
+    else
+        printf 'null'
+    fi
+    printf ',"version":'
+    json_string "${version}"
+    printf ',"generated_password":'
+    if [[ ${password_stdin} == false ]]; then
+        json_string "${detail_password}"
+    else
+        printf 'null'
+    fi
+    printf '}\n'
+}
+
+non_interactive_main() {
+    local version
+    non_interactive=true
+    non_interactive_exit_code=64
+    install_dependencies=false
+    password_stdin=false
+    selected_port_mode=automatic
+    selected_port=0
+    selected_username=
+    selected_password=
+    selected_allow_cn=false
+
+    # Reserve stdout exclusively for the final JSON; all transaction output is stderr.
+    exec 3>&1 1>&2
+    trap 'exit "${non_interactive_exit_code}"' ERR
+    while (($# > 0)); do
+        case $1 in
+            --port)
+                [[ $# -ge 2 ]] || die '--port 缺少参数'
+                if [[ $2 == auto ]]; then
+                    selected_port_mode=automatic
+                    selected_port=0
+                else
+                    if [[ ! $2 =~ ^[1-9][0-9]{3,4}$ ]]; then
+                        die '--port 必须为 auto 或 1024-65535'
+                    fi
+                    ((10#$2 >= 1024 && 10#$2 <= 65535)) ||
+                        die '--port 必须为 auto 或 1024-65535'
+                    selected_port_mode=manual
+                    selected_port=$2
+                fi
+                shift 2
+                ;;
+            --username)
+                [[ $# -ge 2 && -n $2 ]] || die '--username 缺少非空参数'
+                selected_username=$2
+                shift 2
+                ;;
+            --password-stdin)
+                password_stdin=true
+                shift
+                ;;
+            --allow-cn=true | --allow-cn=false)
+                selected_allow_cn=${1#*=}
+                shift
+                ;;
+            --install-deps)
+                install_dependencies=true
+                shift
+                ;;
+            --help)
+                print_install_help >&3
+                return
+                ;;
+            *)
+                die '免交互安装参数无效；请运行 bash install.sh --help'
+                ;;
+        esac
+    done
+    non_interactive_exit_code=77
+    require_root
+    non_interactive_exit_code=73
+    if installation_entry_exists || installation_detected; then
+        die '检测到现有或不完整的 Socks-VPS 安装；请使用管理命令处理'
+    fi
+    non_interactive_exit_code=65
+    version=$(read_package_version)
+    privileged_apply install "${selected_port_mode}" "${selected_port}" \
+        "${version}" "${selected_allow_cn}" socks-1 '' ''
+    non_interactive_exit_code=70
+    print_install_json "${version}" >&3
 }
 
 interactive_main() {
@@ -2566,6 +2803,13 @@ ensure_root_for_command() {
 
 main() {
     case ${1:-} in
+        --help | -h)
+            print_install_help
+            ;;
+        --non-interactive)
+            shift
+            non_interactive_main "$@"
+            ;;
         '')
             interactive_main
             ;;

@@ -28,6 +28,10 @@ status_line() {
     local fd=${3:-1}
     local color symbol
 
+    if [[ ${non_interactive:-false} == true && ${fd} == 1 ]]; then
+        fd=2
+    fi
+
     case ${kind} in
         info)
             color=${color_cyan}
@@ -59,7 +63,7 @@ status_line() {
 
 die() {
     status_line error "$*" 2
-    exit 1
+    exit "${non_interactive_exit_code:-1}"
 }
 
 info() {
@@ -112,6 +116,13 @@ check_member_path() {
 main() {
     local arch archive archive_url expected actual work_dir package_root
 
+    if [[ ${1:-} == --non-interactive ]]; then
+        non_interactive=true
+        non_interactive_exit_code=77
+        [[ ${EUID} -eq 0 ]] || die '免交互安装必须以 root 运行'
+        non_interactive_exit_code=65
+        trap 'exit "${non_interactive_exit_code}"' ERR
+    fi
     note '正在检查运行环境'
     [[ $(uname -s) == Linux ]] || die '仅支持 Linux 系统'
     command -v systemctl >/dev/null 2>&1 || die '未找到 systemctl，需要 systemd'
@@ -167,6 +178,10 @@ main() {
     success '安装包校验通过'
 
     note '正在启动 Socks-VPS 安装程序'
+    # Package installer failures keep their public exit code.
+    if [[ ${non_interactive:-false} == true ]]; then
+        trap - ERR
+    fi
     "${package_root}/scripts/install.sh" "$@"
 }
 

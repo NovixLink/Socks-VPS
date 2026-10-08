@@ -3,7 +3,7 @@
 [程序入口](cmd/) · [实现代码](internal/)
 
 ```bash
-bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download/install.sh)
+bash <(curl -fsSL https://github.com/NovixLink/Socks-VPS/releases/latest/download/install.sh)
 ```
 
 在自己的 Linux VPS 上运行 SOCKS5 代理，为不同设备、应用或使用者分配连接，并通过中文菜单管理。
@@ -11,6 +11,7 @@ bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download
 ## 为什么选择 Socks-VPS
 
 - **安装只需选择端口和大陆访问方式。** 用户名和密码自动生成，安装结束显示完整连接信息，可以直接用于配置客户端。
+- **支持自动化全新安装。** 免交互入口接收端口、凭据和访问选项，以 JSON 返回结果，并提供固定的退出码。
 - **直接导入 Xray 客户端。** 每组 SOCKS 会生成可被支持该格式的 Xray 客户端识别的 `socks://` 分享链接，安装、列表和状态页面都可以直接复制。
 - **一台 VPS 管理多组连接。** 每组 SOCKS 都有独立端口、用户名和密码，便于按设备或用途分配；全部配置由同一个进程运行。
 - **按端口控制大陆来源。** 启用阻断后，命中大陆 IPv4 地址库的连接会在 TCP 握手完成前被丢弃；不同端口可以分别选择是否阻断。
@@ -54,6 +55,71 @@ TCP 端口 [回车 = 随机选择 1024-65535]：
 ```bash
 sudo socks-vpsctl
 ```
+
+### 免交互全新安装
+
+从 v1.4.0 起，发布版引导脚本支持 `--non-interactive`。在 root 会话中下载引导脚本，然后把参数原样传给 `bash install.sh`。下面指定端口和用户名，从密码文件读取密码，允许大陆来源，并允许安装缺少的系统依赖：
+
+```bash
+umask 077
+curl -fsSL https://github.com/NovixLink/Socks-VPS/releases/latest/download/install.sh -o install.sh
+bash install.sh --non-interactive \
+  --port 45123 \
+  --username client \
+  --password-stdin \
+  --allow-cn=true \
+  --install-deps \
+  < /root/socks-password > install-result.json
+```
+
+`/root/socks-password` 由调用方预先准备。密码只从 stdin（标准输入）读取至 EOF，接受一个末尾 LF 换行；内容必须为 1–255 字节 UTF-8，不含 NUL、CR 或内嵌 LF。不支持密码命令行参数。
+
+| 参数 | 默认值与行为 |
+|---|---|
+| `--non-interactive` | 必须放在第一个参数，只做全新安装 |
+| `--port auto` 或 `--port PORT` | 默认 `auto`；具体端口范围为 1024–65535 |
+| `--username USERNAME` | 省略时生成 20 位安全随机值；指定值须为 1–255 字节 UTF-8 |
+| `--password-stdin` | 省略时生成 20 位安全随机密码，仅通过结果中的 `generated_password` 返回 |
+| `--allow-cn=true\|false` | 默认 `false`，即开启大陆来源阻断 |
+| `--install-deps` | 默认不安装依赖；显式指定后允许通过 APT、DNF 或 YUM 安装缺少的 `ss`、`nft` 所属软件包 |
+| `--help` | 查看安装帮助，也可运行包内的 `bash scripts/install.sh --help` |
+
+用户名和密码可以各自指定或省略。指定端口发生占用时返回 `78`，不换端口；自动模式先执行真实 IPv4 bind 检查，在服务启动时遇到 bind 竞争最多重选一次，再次竞争失败返回 `78`。
+
+此入口必须以 root 运行，不调用交互式 sudo。检测到已安装实例、任何不完整安装路径或专用账号冲突时返回 `73`，不安装依赖、不修改现有配置或服务。免交互安装复用原有安装事务、回滚和健康检查。进度与诊断写入 stderr（标准错误）；成功时 stdout（标准输出）只包含一个 JSON 对象，失败时返回非零退出码，不输出成功 JSON。
+
+成功结果示例（调用方提供密码）：
+
+```json
+{"config":"socks-1","port":45123,"username":"client","block_cn":false,"public_ipv4":"203.0.113.10","share_link":null,"version":"1.4.0","generated_password":null}
+```
+
+| JSON 字段 | 类型与含义 |
+|---|---|
+| `config` | string；新配置名，固定为 `socks-1` |
+| `port` | number；健康检查通过的实际监听端口，包含自动重选后的结果 |
+| `username` | string；实际用户名 |
+| `block_cn` | boolean；`true` 表示开启大陆来源阻断 |
+| `public_ipv4` | string 或 null；经导入链接生成校验的公网 IPv4，查询或校验失败时为 null |
+| `share_link` | string 或 null；`socks://` 导入链接；无法生成时为 null。提供密码时也为 null，避免输出其可逆编码；链接仍保存到受保护的实例 `.url` 文件 |
+| `version` | string；安装版本号 |
+| `generated_password` | string 或 null；只有自动生成密码时返回该密码，调用方提供密码时为 null |
+
+省略 `--password-stdin` 时，JSON 会包含生成密码；公网地址可用且链接可生成时，也会包含导入链接。自动化调用方应保存该结果供连接使用。
+
+| 退出码 | 免交互安装结果 |
+|---|---|
+| `0` | 安装与健康检查成功 |
+| `64` | 参数、端口范围、用户名或 stdin 密码无效 |
+| `65` | 引导运行环境不支持、下载失败、安装包缺失、平台不匹配或完整性校验失败 |
+| `69` | 缺少依赖且未允许安装，或依赖安装/可用性检查失败 |
+| `70` | 其他安装、回滚或结果读取/输出失败 |
+| `71` | 服务启动或健康检查失败，执行原有事务回滚 |
+| `73` | 已安装、不完整安装、安装路径或专用账号冲突 |
+| `77` | 非 root 运行 |
+| `78` | 指定端口被占用，或服务 bind 竞争且不能继续重选 |
+
+这些字段和退出码只适用于 `--non-interactive`；原有交互安装及管理子命令保留原行为和输出。
 
 ## 支持环境
 
