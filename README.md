@@ -15,6 +15,7 @@ bash <(curl -fsSL https://github.com/NovixLink/Socks-VPS/releases/latest/downloa
 - **直接导入 Xray 客户端。** 每组 SOCKS 会生成可被支持该格式的 Xray 客户端识别的 `socks://` 分享链接，安装、列表和状态页面都可以直接复制。
 - **一台 VPS 管理多组连接。** 每组 SOCKS 都有独立端口、用户名和密码，便于按设备或用途分配；全部配置由同一个进程运行。
 - **按端口控制大陆来源。** 启用阻断后，命中大陆 IPv4 地址库的连接会在 TCP 握手完成前被丢弃；不同端口可以分别选择是否阻断。
+- **默认丢弃异常的 TCP 连接请求。** 所有 SOCKS 端口都会丢弃携带 IPv4 选项的 TCP 连接请求，用于缓解 Linux 内核漏洞 CVE-2026-98432；正常客户端不使用 IPv4 选项，连接不受影响。
 - **日常维护从中文菜单完成。** 查看连接信息、新增或删除 SOCKS、修改账号和访问设置，都有对应入口，后续调整不需要手工编辑配置文件。
 - **重启和更新后继续使用原有设置。** 服务开机自启，异常退出由 systemd 自动重启；更新保留所有端口、凭据和大陆阻断选项，客户端无需重新配置。
 
@@ -81,7 +82,7 @@ bash install.sh --non-interactive \
 | `--username USERNAME` | 省略时生成 20 位安全随机值；指定值须为 1–255 字节 UTF-8 |
 | `--password-stdin` | 省略时生成 20 位安全随机密码，仅通过结果中的 `generated_password` 返回 |
 | `--allow-cn=true\|false` | 默认 `false`，即开启大陆来源阻断 |
-| `--install-deps` | 默认不安装依赖；显式指定后允许通过 APT、DNF 或 YUM 安装缺少的 `ss`、`nft` 所属软件包 |
+| `--install-deps` | 默认不安装依赖；显式指定后允许通过 APT、DNF 或 YUM 安装缺少的 `ss`、`nft` 所属软件包。`nft` 为必需依赖，缺少且未指定本参数时返回 `69` |
 | `--help` | 查看安装帮助，也可运行包内的 `bash scripts/install.sh --help` |
 
 用户名和密码可以各自指定或省略。指定端口发生占用时返回 `78`，不换端口；自动模式先执行真实 IPv4 bind 检查，在服务启动时遇到 bind 竞争最多重选一次，再次竞争失败返回 `78`。
@@ -128,7 +129,7 @@ bash install.sh --non-interactive \
 - IPv4 网络
 - `curl`、`tar` 和 `sha256sum`
 
-安装器按当前操作检查 `ss`、`nft` 等依赖。缺少依赖时，会先列出需要安装的软件包；回车确认后通过 APT、DNF 或 YUM 安装，输入 `n` 或 `N` 取消。全新安装选择允许大陆来源时，不要求安装 nftables。
+安装器按当前操作检查 `ss`、`nft` 等依赖。缺少依赖时，会先列出需要安装的软件包；回车确认后通过 APT、DNF 或 YUM 安装，输入 `n` 或 `N` 取消。从 v1.5.0 起，每组 SOCKS 都由 Socks-VPS 自有的 nftables 表保护，因此无论是否允许大陆来源都需要 `nft`。
 
 协议范围为 SOCKS5 用户名/密码认证和 TCP `CONNECT`，监听与代理目标均使用 IPv4，目标仅限公网地址，拒绝本机及 IANA 特殊用途地址。不支持 IPv6、UDP、`BIND`，也不额外封装加密隧道。
 
@@ -208,6 +209,15 @@ sudo systemctl start socks-vps.service
 ## 大陆来源地址库
 
 大陆来源阻断采用 IPdeny CN IPv4 网段，地址库随发布包统一交付。新版地址库通过 Socks-VPS 版本更新获取。
+
+## 防火墙规则
+
+Socks-VPS 只维护 `table ip socks_vps`，不改动主机其他防火墙配置。表内两条规则按顺序生效：
+
+1. 丢弃携带 IPv4 选项（IP 头长度大于 20 字节）且目标为任一 SOCKS 端口的 TCP 报文。这是 Linux 内核 CVE-2026-98432 的缓解措施，所有端口始终启用；正常客户端不使用 IPv4 选项，不受影响。
+2. 丢弃来源命中大陆 IPv4 地址库、目标为已启用阻断端口的 TCP 报文。仅对选择阻断大陆来源的端口生效。
+
+更新到 v1.5.0 后，已安装的实例在服务重启时自动获得第 1 条规则，无需修改配置。
 
 ## 配置与资源
 

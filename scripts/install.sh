@@ -577,21 +577,13 @@ action_dependency_requirements() {
     fi
 
     case ${action} in
-        install)
+        install | reinstall | add | credentials)
             dependency_need_ss=true
-            if [[ ${allow_cn} == false ]]; then
-                dependency_need_nft=true
-            fi
+            dependency_need_nft=true
             ;;
         update)
             dependency_need_ss=true
             if configuration_requires_nft; then
-                dependency_need_nft=true
-            fi
-            ;;
-        reinstall | add | credentials)
-            dependency_need_ss=true
-            if [[ ${allow_cn} == false ]] || configuration_requires_nft; then
                 dependency_need_nft=true
             fi
             ;;
@@ -799,11 +791,9 @@ configured_ports() {
     fi
 }
 
-blocked_cn_ports() {
+configured_listener_ports() {
     if [[ -d ${instances_dir} ]]; then
-        "${package_binary}" config-ports \
-            --config-dir "${instances_dir}" \
-            --blocked-cn-only
+        "${package_binary}" config-ports --config-dir "${instances_dir}"
     elif [[ -f ${legacy_config_file} ]]; then
         "${package_binary}" config-port --config "${legacy_config_file}"
     else
@@ -811,6 +801,9 @@ blocked_cn_ports() {
     fi
 }
 
+# Every SOCKS listener needs the owned nftables table: it drops IPv4 TCP
+# connection requests that carry IP options (CVE-2026-98432 mitigation) for all
+# listener ports and blocks CN sources for the ports configured to do so.
 configuration_requires_nft() {
     configuration_tree_requires_nft "${config_dir}"
 }
@@ -822,8 +815,7 @@ configuration_tree_requires_nft() {
     if [[ -d ${tree}/instances ]]; then
         ports=$(
             "${package_binary}" config-ports \
-                --config-dir "${tree}/instances" \
-                --blocked-cn-only
+                --config-dir "${tree}/instances"
         ) || return 1
         if [[ -n ${ports} ]]; then
             return 0
@@ -1172,24 +1164,13 @@ preflight_firewall() {
     local allow_cn=$3
     local tables
     local table_state=absent
-    local require_nft=false
     local -a render_args
 
-    if [[ ${port_mode} == preserve ]]; then
-        if configuration_requires_nft; then
-            require_nft=true
-        fi
-    elif [[ ${allow_cn} == false ]]; then
-        require_nft=true
-    fi
-    if ! command -v nft >/dev/null 2>&1; then
-        [[ ${require_nft} == false ]] || die '启用中国大陆来源拦截时必须安装 nft'
-        return 0
-    fi
-
-    if ! tables=$(nft list tables 2>/dev/null); then
-        [[ ${require_nft} == false ]] && return 0
-        die '无法检查 nftables 表'
+    command -v nft >/dev/null 2>&1 ||
+        die '运行 SOCKS 监听必须安装 nft：用于丢弃携带 IPv4 选项的 TCP 连接请求和大陆来源拦截'
+    tables=$(nft list tables 2>/dev/null) || die '无法检查 nftables 表'
+    if [[ ${port_mode} != preserve ]]; then
+        status_line info '防火墙将丢弃携带 IPv4 选项的 TCP 连接请求（CVE-2026-98432 缓解），正常 SOCKS 客户端不受影响'
     fi
     if grep -Eq '^[[:space:]]*table ip socks_vps[[:space:]]*$' <<<"${tables}"; then
         nft --json list table ip socks_vps >/dev/null 2>&1 ||
@@ -1223,20 +1204,20 @@ preflight_firewall() {
 }
 
 require_socks_table_absent() {
-    local blocked_ports tables existing_json removal_batch
+    local ports tables existing_json removal_batch
 
     if ! command -v nft >/dev/null 2>&1; then
-        blocked_ports=$(blocked_cn_ports) ||
-            die '无法读取大陆来源阻断配置，且未找到 nft'
-        [[ -z ${blocked_ports} ]] ||
-            die '存在拦截中国大陆来源的端口，但系统未找到 nft'
+        ports=$(configured_listener_ports) ||
+            die '无法读取 SOCKS 监听端口配置，且未找到 nft'
+        [[ -z ${ports} ]] ||
+            die '存在 SOCKS 监听端口，但系统未找到 nft'
         return 0
     fi
     if ! tables=$(nft list tables 2>/dev/null); then
-        blocked_ports=$(blocked_cn_ports) ||
-            die '无法读取大陆来源阻断配置，且 nft 无法使用'
-        [[ -z ${blocked_ports} ]] ||
-            die '存在拦截中国大陆来源的端口，但 nft 无法使用'
+        ports=$(configured_listener_ports) ||
+            die '无法读取 SOCKS 监听端口配置，且 nft 无法使用'
+        [[ -z ${ports} ]] ||
+            die '存在 SOCKS 监听端口，但 nft 无法使用'
         return 0
     fi
     if grep -Eq '^[[:space:]]*table ip socks_vps[[:space:]]*$' <<<"${tables}"; then
@@ -2199,11 +2180,7 @@ add_instance() {
         die '所选端口不可用'
     check_new_config_without_write \
         "${selected}" "${version}" "${username}" "${password}" "${allow_cn}"
-    if [[ ${allow_cn} == true && ${dependency_need_nft} == true ]]; then
-        preflight_firewall preserve 0 false
-    else
-        preflight_firewall "${port_mode}" "${selected}" "${allow_cn}"
-    fi
+    preflight_firewall "${port_mode}" "${selected}" "${allow_cn}"
     begin_transaction add
     stop_owned_services
     create_new_config \
@@ -2288,7 +2265,6 @@ change_instance_settings() {
 remove_instance() {
     local name=$1
     local path target
-    local remaining_requires_nft=false
     local -a paths
 
     require_owned_installation
@@ -2301,18 +2277,8 @@ remove_instance() {
         die '不能删除最后一组 SOCKS 配置，请使用 socks-vpsctl uninstall'
     target="${instances_dir}/${name}.json"
     [[ -f ${target} ]] || die "SOCKS 配置不存在：${name}"
-    for path in "${paths[@]}"; do
-        [[ ${path} == "${target}" ]] && continue
-        read_config_detail "${path}"
-        if [[ ${detail_allow_cn} == false ]]; then
-            remaining_requires_nft=true
-            break
-        fi
-    done
     ensure_system_dependencies remove false 0.0.0
-    if [[ ${remaining_requires_nft} == true ]]; then
-        preflight_firewall preserve 0 false
-    fi
+    preflight_firewall preserve 0 false
     begin_transaction remove
     stop_owned_services
     rm -f -- "${target}"
@@ -2458,7 +2424,7 @@ print_install_help() {
                         密码为 1-255 字节 UTF-8，不含 NUL、CR 或内嵌 LF
                         省略时生成密码，仅在 JSON 的 generated_password 中返回
   --allow-cn=true|false  是否允许大陆来源；默认 false（开启阻断）
-  --install-deps        允许通过 APT、DNF 或 YUM 安装缺少的 ss/nft 依赖
+  --install-deps        允许通过 APT、DNF 或 YUM 安装缺少的 ss/nft 依赖（nft 必需）
   --help                显示帮助
 
 指定端口冲突即失败；自动端口遇启动 bind 竞争最多重选一次。

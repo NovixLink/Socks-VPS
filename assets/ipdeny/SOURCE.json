@@ -3,9 +3,9 @@
   "source_url": "https://www.ipdeny.com/ipblocks/data/aggregated/cn-aggregated.zone",
   "copyright_url": "https://www.ipdeny.com/ipblocks/data/aggregated/Copyrights.txt",
   "upstream_md5_url": "https://www.ipdeny.com/ipblocks/data/aggregated/MD5SUM",
-  "fetched_at": "2026-08-03T18:08:44Z",
-  "upstream_last_modified": "2026-08-03T10:20:34Z",
-  "upstream_md5": "9ce95070559ca1a355472e7b65f49aae",
-  "sha256": "84d2f6eaacc5571ccd882ecde4440848077fc6452171e4954faf72a4fcc53a95",
-  "line_count": 5509
+  "fetched_at": "2026-10-31T22:19:27Z",
+  "upstream_last_modified": "2026-10-31T11:22:54Z",
+  "upstream_md5": "e6ff2e6aa5b69c76e31dd43855e2ae48",
+  "sha256": "6b29fb5ce8f1247228a04c0614e5835512b3ee535ce51b943dd2f1b9275c082a",
+  "line_count": 5517
 }

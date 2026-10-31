@@ -745,13 +745,14 @@ func firewallRenderCommand(args []string, stdin io.Reader, stdout, stderr io.Wri
 		if err != nil {
 			return exitConfigError, err
 		}
-		var blockedPorts []int
+		var listenerPorts, blockedPorts []int
 		for _, cfg := range configs {
+			listenerPorts = append(listenerPorts, cfg.Port)
 			if !cfg.AllowCN {
 				blockedPorts = append(blockedPorts, cfg.Port)
 			}
 		}
-		if err := checkFirewallHealth(*existingPath, stdin, blockedPorts); err != nil {
+		if err := checkFirewallHealth(*existingPath, stdin, listenerPorts, blockedPorts); err != nil {
 			return exitRuntimeError, err
 		}
 		return exitOK, nil
@@ -806,12 +807,13 @@ func firewallRenderCommand(args []string, stdin io.Reader, stdout, stderr io.Wri
 		)
 	}
 
-	var blockedPorts []int
+	var listenerPorts, blockedPorts []int
 	if *configPath != "" {
 		cfg, err := config.Load(*configPath)
 		if err != nil {
 			return exitConfigError, err
 		}
+		listenerPorts = append(listenerPorts, cfg.Port)
 		if !cfg.AllowCN {
 			blockedPorts = append(blockedPorts, cfg.Port)
 		}
@@ -821,6 +823,7 @@ func firewallRenderCommand(args []string, stdin io.Reader, stdout, stderr io.Wri
 			return exitConfigError, err
 		}
 		for _, cfg := range configs {
+			listenerPorts = append(listenerPorts, cfg.Port)
 			if !cfg.AllowCN {
 				blockedPorts = append(blockedPorts, cfg.Port)
 			}
@@ -829,6 +832,7 @@ func firewallRenderCommand(args []string, stdin io.Reader, stdout, stderr io.Wri
 		if err := port.Validate(*portNumber); err != nil {
 			return exitConfigError, err
 		}
+		listenerPorts = append(listenerPorts, *portNumber)
 		if !*allowCN {
 			blockedPorts = append(blockedPorts, *portNumber)
 		}
@@ -856,7 +860,7 @@ func firewallRenderCommand(args []string, stdin io.Reader, stdout, stderr io.Wri
 		}
 	}
 	if err := renderOutput(*outputPath, stdout, func(writer io.Writer) error {
-		return firewall.RenderPorts(writer, blockedPorts, prefixes, state)
+		return firewall.RenderPorts(writer, listenerPorts, blockedPorts, prefixes, state)
 	}); err != nil {
 		return exitRuntimeError, err
 	}
@@ -866,16 +870,16 @@ func firewallRenderCommand(args []string, stdin io.Reader, stdout, stderr io.Wri
 	return exitOK, nil
 }
 
-func checkFirewallHealth(path string, stdin io.Reader, blockedPorts []int) error {
+func checkFirewallHealth(path string, stdin io.Reader, listenerPorts, blockedPorts []int) error {
 	if path == "-" {
-		return firewall.CheckHealth(stdin, blockedPorts)
+		return firewall.CheckHealth(stdin, listenerPorts, blockedPorts)
 	}
 	document, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open existing nftables table JSON %s: %w", path, err)
 	}
 	defer document.Close()
-	return firewall.CheckHealth(document, blockedPorts)
+	return firewall.CheckHealth(document, listenerPorts, blockedPorts)
 }
 
 func existingTableState(

@@ -24,15 +24,21 @@ const (
 	OwnershipComment = "Socks-VPS managed CN IPv4 set"
 	chainComment     = "Socks-VPS managed input chain"
 
+	// optionsHeaderLength is the IPv4 header length, in 32-bit words, above
+	// which a packet carries IP options. CVE-2026-98432 is only reachable
+	// through TCP connection requests that carry IPv4 options.
+	optionsHeaderLength = 5
+
 	minPort = 1024
 	maxPort = 65535
 )
 
 var (
-	ErrEmptyCIDRs      = errors.New("IPv4 CIDR list is empty")
-	ErrTableConflict   = errors.New("nftables table ip socks_vps is not owned by Socks-VPS")
-	ErrTableNotPresent = errors.New("nftables JSON does not contain table ip socks_vps")
-	ErrTableUnhealthy  = errors.New("nftables table ip socks_vps does not provide required CN source blocking")
+	ErrEmptyCIDRs          = errors.New("IPv4 CIDR list is empty")
+	ErrTableConflict       = errors.New("nftables table ip socks_vps is not owned by Socks-VPS")
+	ErrTableNotPresent     = errors.New("nftables JSON does not contain table ip socks_vps")
+	ErrTableUnhealthy      = errors.New("nftables table ip socks_vps does not provide the required listener protection")
+	ErrBlockedNotListening = errors.New("every CN-blocked port must also be a listener port")
 )
 
 // TableState describes the read-only ownership decision made before rendering.
@@ -161,27 +167,30 @@ func decodeNftablesDocument(reader io.Reader) (nftablesDocument, error) {
 	return document, nil
 }
 
-// CheckHealth verifies the minimum live nftables state required to block CN
-// sources on every supplied listener port. Extra set elements, rules, and
-// unrelated objects are allowed.
-func CheckHealth(reader io.Reader, blockedPorts []int) error {
+// CheckHealth verifies the minimum live nftables state required for the
+// supplied listener ports: every listener port must be covered by the IPv4
+// options drop rule (CVE-2026-98432 mitigation), and every CN-blocked port must
+// additionally be covered by the CN source drop rule backed by a non-empty
+// owned set. Extra set elements, rules, and unrelated objects are allowed.
+func CheckHealth(reader io.Reader, listenerPorts, blockedPorts []int) error {
 	if reader == nil {
 		return fmt.Errorf("check nftables table health: nil reader")
 	}
-	requiredPorts := make(map[int]struct{}, len(blockedPorts))
-	for _, port := range blockedPorts {
-		if port < minPort || port > maxPort {
-			return fmt.Errorf(
-				"check nftables table health: port must be between %d and %d: %d",
-				minPort,
-				maxPort,
-				port,
-			)
-		}
-		requiredPorts[port] = struct{}{}
+	requiredListeners, err := portSet("check nftables table health", listenerPorts)
+	if err != nil {
+		return err
 	}
-	if len(requiredPorts) == 0 {
-		return fmt.Errorf("%w: no listener port requires blocking", ErrTableUnhealthy)
+	requiredPorts, err := portSet("check nftables table health", blockedPorts)
+	if err != nil {
+		return err
+	}
+	if len(requiredListeners) == 0 {
+		return fmt.Errorf("%w: no listener port requires protection", ErrTableUnhealthy)
+	}
+	for port := range requiredPorts {
+		if _, listening := requiredListeners[port]; !listening {
+			return fmt.Errorf("check nftables table health: %w: %d", ErrBlockedNotListening, port)
+		}
 	}
 
 	document, err := decodeNftablesDocument(reader)
@@ -196,6 +205,11 @@ func CheckHealth(reader io.Reader, blockedPorts []int) error {
 	terminatingRuleBeforeCoverage := false
 	acceptRuleBeforeCoverage := false
 	coveredPorts := make(map[int]struct{}, len(requiredPorts))
+	optionsCoveredPorts := make(map[int]struct{}, len(requiredListeners))
+	coverageComplete := func() bool {
+		return requiredPortsAreCovered(requiredPorts, coveredPorts) &&
+			requiredPortsAreCovered(requiredListeners, optionsCoveredPorts)
+	}
 	for _, raw := range document.Nftables {
 		var object struct {
 			Table *struct {
@@ -275,7 +289,10 @@ func CheckHealth(reader io.Reader, blockedPorts []int) error {
 			for port := range matchingDropRulePorts(object.Rule.Expr) {
 				coveredPorts[port] = struct{}{}
 			}
-			if !requiredPortsAreCovered(requiredPorts, coveredPorts) &&
+			for port := range matchingOptionsDropRulePorts(object.Rule.Expr) {
+				optionsCoveredPorts[port] = struct{}{}
+			}
+			if !coverageComplete() &&
 				isUnconditionalTerminatingRule(object.Rule.Expr) {
 				terminatingRuleBeforeCoverage = true
 			}
@@ -283,6 +300,10 @@ func CheckHealth(reader io.Reader, blockedPorts []int) error {
 				object.Rule.Expr,
 				requiredPorts,
 				coveredPorts,
+			) || acceptsUncoveredBlockedTraffic(
+				object.Rule.Expr,
+				requiredListeners,
+				optionsCoveredPorts,
 			) {
 				acceptRuleBeforeCoverage = true
 			}
@@ -294,7 +315,7 @@ func CheckHealth(reader io.Reader, blockedPorts []int) error {
 		return fmt.Errorf("%w: table is missing", ErrTableUnhealthy)
 	case !ownedSetPresent:
 		return fmt.Errorf("%w: ownership marker is missing", ErrTableUnhealthy)
-	case !setHasElements:
+	case len(requiredPorts) > 0 && !setHasElements:
 		return fmt.Errorf("%w: %s set is empty", ErrTableUnhealthy, SetName)
 	case !correctInputChain:
 		return fmt.Errorf("%w: input filter base chain is missing or incorrect", ErrTableUnhealthy)
@@ -309,12 +330,39 @@ func CheckHealth(reader io.Reader, blockedPorts []int) error {
 			ErrTableUnhealthy,
 		)
 	}
+	for port := range requiredListeners {
+		if _, covered := optionsCoveredPorts[port]; !covered {
+			return fmt.Errorf(
+				"%w: port %d is not covered by the IPv4 options drop rule",
+				ErrTableUnhealthy,
+				port,
+			)
+		}
+	}
 	for port := range requiredPorts {
 		if _, covered := coveredPorts[port]; !covered {
 			return fmt.Errorf("%w: port %d is not covered by a drop rule", ErrTableUnhealthy, port)
 		}
 	}
 	return nil
+}
+
+// portSet validates listener ports and returns them as a set.
+func portSet(context string, ports []int) (map[int]struct{}, error) {
+	set := make(map[int]struct{}, len(ports))
+	for _, port := range ports {
+		if port < minPort || port > maxPort {
+			return nil, fmt.Errorf(
+				"%s: port must be between %d and %d: %d",
+				context,
+				minPort,
+				maxPort,
+				port,
+			)
+		}
+		set[port] = struct{}{}
+	}
+	return set, nil
 }
 
 func requiredPortsAreCovered(required, covered map[int]struct{}) bool {
@@ -393,6 +441,77 @@ func matchingDropRulePorts(expressions []json.RawMessage) map[int]struct{} {
 		return nil
 	}
 	return ports
+}
+
+// matchingOptionsDropRulePorts returns the destination ports of a rule that
+// drops IPv4 TCP packets whose header carries IP options: exactly one
+// `ip hdrlength > 5` match, one `tcp dport` match, an optional counter and a
+// drop verdict.
+func matchingOptionsDropRulePorts(expressions []json.RawMessage) map[int]struct{} {
+	var lengthMatches, portMatches int
+	var drop bool
+	ports := make(map[int]struct{})
+	for _, raw := range expressions {
+		var statement map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &statement); err != nil || len(statement) != 1 {
+			return nil
+		}
+		if _, exists := statement["drop"]; exists {
+			drop = true
+			continue
+		}
+		if _, exists := statement["counter"]; exists {
+			continue
+		}
+
+		matchRaw, exists := statement["match"]
+		if !exists {
+			return nil
+		}
+		var match struct {
+			Op    string          `json:"op"`
+			Left  json.RawMessage `json:"left"`
+			Right json.RawMessage `json:"right"`
+		}
+		if err := json.Unmarshal(matchRaw, &match); err != nil {
+			return nil
+		}
+		switch {
+		case isPayloadExpression(match.Left, "ip", "hdrlength"):
+			if match.Op != ">" || rawJSONNumber(match.Right) != optionsHeaderLength {
+				return nil
+			}
+			lengthMatches++
+		case isPayloadExpression(match.Left, "tcp", "dport"):
+			if match.Op != "==" && match.Op != "in" {
+				return nil
+			}
+			portMatches++
+			for port := range nftPortValues(match.Right) {
+				ports[port] = struct{}{}
+			}
+		default:
+			return nil
+		}
+	}
+	if lengthMatches != 1 || portMatches != 1 || !drop {
+		return nil
+	}
+	return ports
+}
+
+func rawJSONNumber(raw json.RawMessage) int {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value json.Number
+	if err := decoder.Decode(&value); err != nil {
+		return -1
+	}
+	number, err := strconv.Atoi(value.String())
+	if err != nil {
+		return -1
+	}
+	return number
 }
 
 func isUnconditionalTerminatingRule(expressions []json.RawMessage) bool {
@@ -556,25 +675,33 @@ func nftPortNumber(value any) (int, bool) {
 	return port, true
 }
 
-// Render writes one complete nft -f batch for one blocked listener port.
+// Render writes one complete nft -f batch for one listener port that also
+// blocks CN sources.
 func Render(writer io.Writer, port int, prefixes []netip.Prefix, state TableState) error {
-	return RenderPorts(writer, []int{port}, prefixes, state)
+	return RenderPorts(writer, []int{port}, []int{port}, prefixes, state)
 }
 
-// RenderPorts writes one complete nft -f batch for all blocked listener ports.
+// RenderPorts writes one complete nft -f batch for all listener ports.
+// Every listener port gets the IPv4 options drop rule (CVE-2026-98432
+// mitigation); the CN-blocked subset additionally gets the CN source drop rule
+// backed by the bundled IPdeny prefixes, which are required only in that case.
 // TableAbsent creates the table. TableOwned first deletes the owned table and
 // then recreates it in the same batch, so nft applies the replacement as one
 // transaction. A non-empty port list never modifies a foreign table.
 //
-// An empty port list requests no CN source blocking. In that state an owned
-// table is removed, while absent and foreign tables are left untouched.
+// An empty listener port list requests no protection at all. In that state an
+// owned table is removed, while absent and foreign tables are left untouched.
 func RenderPorts(
 	writer io.Writer,
-	ports []int,
+	listenerPorts []int,
+	blockedPorts []int,
 	prefixes []netip.Prefix,
 	state TableState,
 ) error {
-	if len(ports) == 0 {
+	if len(listenerPorts) == 0 {
+		if len(blockedPorts) != 0 {
+			return fmt.Errorf("render nftables batch: %w", ErrBlockedNotListening)
+		}
 		switch state {
 		case TableAbsent, TableForeign:
 			return nil
@@ -587,27 +714,27 @@ func RenderPorts(
 	if writer == nil {
 		return fmt.Errorf("render nftables batch: nil writer")
 	}
-	seenPorts := make(map[int]struct{}, len(ports))
-	for _, port := range ports {
-		if port < minPort || port > maxPort {
-			return fmt.Errorf(
-				"render nftables batch: port must be between %d and %d: %d",
-				minPort,
-				maxPort,
-				port,
-			)
-		}
-		if _, exists := seenPorts[port]; exists {
-			return fmt.Errorf("render nftables batch: duplicate port %d", port)
-		}
-		seenPorts[port] = struct{}{}
+	listeners, err := uniquePorts("render nftables batch", listenerPorts)
+	if err != nil {
+		return err
 	}
-	if len(prefixes) == 0 {
-		return ErrEmptyCIDRs
+	blocked, err := uniquePorts("render nftables batch", blockedPorts)
+	if err != nil {
+		return err
 	}
-	for index, prefix := range prefixes {
-		if !prefix.IsValid() || !prefix.Addr().Is4() || prefix != prefix.Masked() {
-			return fmt.Errorf("render nftables batch: invalid canonical IPv4 CIDR at index %d: %v", index, prefix)
+	for port := range blocked {
+		if _, exists := listeners[port]; !exists {
+			return fmt.Errorf("render nftables batch: %w: %d", ErrBlockedNotListening, port)
+		}
+	}
+	if len(blocked) > 0 {
+		if len(prefixes) == 0 {
+			return ErrEmptyCIDRs
+		}
+		for index, prefix := range prefixes {
+			if !prefix.IsValid() || !prefix.Addr().Is4() || prefix != prefix.Masked() {
+				return fmt.Errorf("render nftables batch: invalid canonical IPv4 CIDR at index %d: %v", index, prefix)
+			}
 		}
 	}
 
@@ -638,20 +765,22 @@ func RenderPorts(
 	if _, err := io.WriteString(writer, "\ttype ipv4_addr;\n\tflags interval;\n"); err != nil {
 		return fmt.Errorf("render nftables set type: %w", err)
 	}
-	if _, err := io.WriteString(writer, "\telements = {\n"); err != nil {
-		return fmt.Errorf("render nftables set elements: %w", err)
-	}
-	for index, prefix := range prefixes {
-		suffix := ","
-		if index == len(prefixes)-1 {
-			suffix = ""
+	if len(blocked) > 0 {
+		if _, err := io.WriteString(writer, "\telements = {\n"); err != nil {
+			return fmt.Errorf("render nftables set elements: %w", err)
 		}
-		if _, err := fmt.Fprintf(writer, "\t\t%s%s\n", prefix, suffix); err != nil {
-			return fmt.Errorf("render nftables set element %d: %w", index, err)
+		for index, prefix := range prefixes {
+			suffix := ","
+			if index == len(prefixes)-1 {
+				suffix = ""
+			}
+			if _, err := fmt.Fprintf(writer, "\t\t%s%s\n", prefix, suffix); err != nil {
+				return fmt.Errorf("render nftables set element %d: %w", index, err)
+			}
 		}
-	}
-	if _, err := io.WriteString(writer, "\t};\n"); err != nil {
-		return fmt.Errorf("render nftables set closing: %w", err)
+		if _, err := io.WriteString(writer, "\t};\n"); err != nil {
+			return fmt.Errorf("render nftables set closing: %w", err)
+		}
 	}
 	if _, err := fmt.Fprintf(writer, "\tcomment %q;\n}\n\n", OwnershipComment); err != nil {
 		return fmt.Errorf("render nftables set comment: %w", err)
@@ -669,6 +798,25 @@ func RenderPorts(
 	}
 	if _, err := fmt.Fprintf(
 		writer,
+		"add rule %s %s %s ip hdrlength > %d tcp dport ",
+		TableFamily,
+		TableName,
+		ChainName,
+		optionsHeaderLength,
+	); err != nil {
+		return fmt.Errorf("render nftables options drop rule: %w", err)
+	}
+	if err := writePortList(writer, listenerPorts); err != nil {
+		return fmt.Errorf("render nftables options drop rule: %w", err)
+	}
+	if _, err := io.WriteString(writer, " counter drop\n"); err != nil {
+		return fmt.Errorf("render nftables options drop rule closing: %w", err)
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintf(
+		writer,
 		"add rule %s %s %s ip saddr @%s tcp dport ",
 		TableFamily,
 		TableName,
@@ -677,32 +825,56 @@ func RenderPorts(
 	); err != nil {
 		return fmt.Errorf("render nftables drop rule: %w", err)
 	}
-	if len(ports) == 1 {
-		if _, err := fmt.Fprint(writer, ports[0]); err != nil {
-			return fmt.Errorf("render nftables drop rule port: %w", err)
-		}
-	} else {
-		if _, err := io.WriteString(writer, "{ "); err != nil {
-			return fmt.Errorf("render nftables drop rule ports: %w", err)
-		}
-		for index, port := range ports {
-			if index > 0 {
-				if _, err := io.WriteString(writer, ", "); err != nil {
-					return fmt.Errorf("render nftables drop rule separator: %w", err)
-				}
-			}
-			if _, err := fmt.Fprint(writer, port); err != nil {
-				return fmt.Errorf("render nftables drop rule port %d: %w", index, err)
-			}
-		}
-		if _, err := io.WriteString(writer, " }"); err != nil {
-			return fmt.Errorf("render nftables drop rule ports: %w", err)
-		}
+	if err := writePortList(writer, blockedPorts); err != nil {
+		return fmt.Errorf("render nftables drop rule: %w", err)
 	}
 	if _, err := io.WriteString(writer, " counter drop\n"); err != nil {
 		return fmt.Errorf("render nftables drop rule closing: %w", err)
 	}
 	return nil
+}
+
+// uniquePorts validates a port list and rejects duplicates.
+func uniquePorts(context string, ports []int) (map[int]struct{}, error) {
+	seen := make(map[int]struct{}, len(ports))
+	for _, port := range ports {
+		if port < minPort || port > maxPort {
+			return nil, fmt.Errorf(
+				"%s: port must be between %d and %d: %d",
+				context,
+				minPort,
+				maxPort,
+				port,
+			)
+		}
+		if _, exists := seen[port]; exists {
+			return nil, fmt.Errorf("%s: duplicate port %d", context, port)
+		}
+		seen[port] = struct{}{}
+	}
+	return seen, nil
+}
+
+func writePortList(writer io.Writer, ports []int) error {
+	if len(ports) == 1 {
+		_, err := fmt.Fprint(writer, ports[0])
+		return err
+	}
+	if _, err := io.WriteString(writer, "{ "); err != nil {
+		return err
+	}
+	for index, port := range ports {
+		if index > 0 {
+			if _, err := io.WriteString(writer, ", "); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprint(writer, port); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(writer, " }")
+	return err
 }
 
 // RenderRemove writes the complete batch for removing the Socks-VPS table.
