@@ -32,6 +32,6 @@ Socks-VPS 是独立Go SOCKS5服务，不引入Xray运行时。
 
 ## 资料入口
 
-- 维护者内部资料在私有仓库 `NovixLink/Socks-VPS-internal`。有权限时在本仓库根目录执行 `gh repo clone NovixLink/Socks-VPS-internal cowork`；`cowork/` 已被忽略，不进入公开仓库。存在 `cowork/AGENTS.md` 时先读它。
+- 维护者内部资料在私有仓库 `NovixLink/team-knowledge-base` 的 `projects/Socks-VPS/`。有权限时把 team-knowledge-base 克隆到本仓库的同级目录，再在本仓库根目录执行 `ln -s ../team-knowledge-base/projects/Socks-VPS cowork`；`cowork` 已被忽略，不进入公开仓库。存在 `cowork/AGENTS.md` 时先读它。
 - 无权限或尚未克隆时只按本文件和 README 工作；不在公开仓库新建 cowork 或提交内部资料。
 - 本仓库只提交公开源码、规则和使用说明；内部链接与内部规则只写在 cowork。`localwork/` 只放个人本机备注，不进入Git或发布产物。
